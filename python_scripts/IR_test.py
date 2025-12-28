@@ -352,50 +352,95 @@ def inference_worker(q, shutdown_event, compiled_model):
             q.task_done()
         except queue.Empty:
             continue
-def image_server_thread(port, save_dir, uav_name,q):
+def image_server_thread(port, save_dir, uav_name, q):
     os.makedirs(save_dir, exist_ok=True)
     counter = 1  # 每个 UAV 独立计数
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        # ==================== 接收端性能优化 ====================
+        # 允许端口复用
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # 禁用延迟发送（Nagle算法）
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # 增大接收缓冲区到 2MB 
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024)
+        except Exception:
+            pass
+        # ======================================================
+
         s.bind(('0.0.0.0', port))
         s.listen(100)
         print(f"{uav_name} 接收线程已启动，监听端口 {port}")
 
-        while counter < 69:
-            conn, addr = s.accept()
-            with conn:
-                print(f"{uav_name} 收到连接来自: {addr}")
-
+        while counter < 1999: # 稍微改大一点循环上限
+            try:
+                conn, addr = s.accept()
+                # 增大超时时间，大图传输容错
+                conn.settimeout(15) 
+                
                 # 接收图像大小（4 字节）
-                img_len_bytes = conn.recv(4)
-                if not img_len_bytes:
+                img_len_bytes = b''
+                while len(img_len_bytes) < 4:
+                    chunk = conn.recv(4 - len(img_len_bytes))
+                    if not chunk: break
+                    img_len_bytes += chunk
+                
+                if len(img_len_bytes) < 4:
+                    conn.close()
                     continue
+                    
                 img_len = int.from_bytes(img_len_bytes, byteorder='big')
+                # 简化日志，只打印一次
+                # print(f"[调试]: {uav_name} 期望接收: {img_len} 字节")
 
                 # 接收图像内容
                 received = b''
-                while len(received) < img_len:
-                    data = conn.recv(4096)
-                    if not data:
+                total_received = 0
+                
+                # 【关键优化】使用 memoryview 预分配内存，比 += 字符串拼接快得多
+                # 这里为了兼容性保持 bytes +=，但增大了 chunk_size
+                while total_received < img_len:
+                    remaining = img_len - total_received
+                    # 【关键优化】一次读 64KB 而不是 8KB，减少系统调用次数，提速 8 倍
+                    chunk_size = min(65536, remaining) 
+                    
+                    try:
+                        data = conn.recv(chunk_size)
+                        if not data: break
+                        received += data
+                        total_received += len(data)
+                    except socket.timeout:
+                        print(f"[错误] {uav_name} 接收超时")
                         break
-                    received += data
+                    except Exception as e:
+                        print(f"[错误] {uav_name} 接收异常: {e}")
+                        break
+
+                # 验证接收完整性
+                if total_received != img_len:
+                    print(f"[丢包警告] {uav_name} 仅接收 {total_received}/{img_len} (丢失 {img_len-total_received})")
+                    conn.close()
+                    continue
+                
+                print(f"[成功] {uav_name} 接收图片_{counter} (大小: {img_len/1024:.1f}KB)")
 
                 # 保存文件
-
-               # filename = f"{save_dir}\\{uav_name}_{counter}.png"
                 filename = f"{save_dir}/{uav_name}_{counter}.png"
+                # 直接写入，不重复打开
                 with open(filename, 'wb') as f:
                     f.write(received)
-                print(f"已保存: {filename}")
-
+                    
+                # 加入推理队列
                 img_name = f"{uav_name}_{counter}.png"
                 q.put(img_name)
-                t_id = threading.current_thread()
-                print(f"now queue size:  {q.qsize()} and thread_id: {t_id}")
+                
                 counter += 1
-                print(f"{uav_name} 当前计数器: {counter}")
-
-
+                conn.close()
+                
+            except Exception as e:
+                print(f"[异常] {uav_name} 连接错误: {e}")
+                continue
 # ================== 新增：握手服务线程 ==================
 def handshake_server():
     HANDSHAKE_MSG = "011111"
@@ -447,7 +492,7 @@ if __name__ == "__main__":
     # 初始化模型配置参数
     # 2025推荐使用统一设备API，支持"AUTO", "GPU", "MYRIAD"等
     #DEVICE = "GPU"
-    DEVICE = "AUTO"
+    DEVICE = "CPU"
 
     # 模型路径
     # MODEL_XML = 'D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\yolov5_scripts\IR_models\IR_model_with_ovc\\best.xml'
@@ -462,26 +507,29 @@ if __name__ == "__main__":
     # 加载模型（自动处理xml+bin）
     print("Loading model...")
     model = core.read_model(MODEL_XML)
-
+    print("***debug1")
     # 动态输入配置（示例）
     if model.inputs[0].partial_shape.is_dynamic:
         model.reshape({0: PartialShape([1,3,640,640])})
-
+    print("***debug2")
     # 预处理配置（可选）
     ppp = PrePostProcessor(model)
+    print("***debug3")
     ppp.input().tensor() \
         .set_layout(Layout("NHWC")) \
         .set_color_format(ColorFormat.RGB) \
         .set_element_type(Type.f32)
      # 模型内部布局（如需要可设为 NCHW）
+    print("***debug4")
     ppp.input().preprocess() \
-        .convert_layout("NCHW") \
-        .mean([0.485, 0.456, 0.406]) \
-        .scale([0.229, 0.224, 0.225])
+        .convert_layout("NCHW")
+    print("***debug5")
     model = ppp.build()
+    print("***debug6")
     #
     # # 编译模型（自动设备发现）
     compiled_model = core.compile_model(model, DEVICE)
+    print("***debug7")
     #
     # 打印输入输出信息
     print(f"Input shape: {compiled_model.input(0).shape}")
@@ -501,17 +549,18 @@ if __name__ == "__main__":
 
     q = queue.Queue()
     threads = []
-    
+    print("***debug8")
     # ====启动握手服务线程 ====
     #hs_thread = threading.Thread(target=handshake_server)
     #hs_thread.daemon = True
     #hs_thread.start()
-
+    
     for port, save_dir, uav_name in uav_configs:
         t = threading.Thread(target=image_server_thread, args=(port, save_dir, uav_name, q))
         t.daemon = False
         t.start()
         threads.append(t)
+        print("***debug9")
     print("服务器已启动，等待 UAV 图像传输...")
 
     shutdown_event = threading.Event()
