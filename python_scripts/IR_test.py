@@ -19,6 +19,61 @@ COLORS = [
     [255, 0, 0],    # 蓝 (Blue)
     [255, 0, 255],  # 品红 (Magenta)
 ]
+
+# =================================================================
+# 威胁权重配置：ID与权重的映射
+THREAT_CONFIG = {
+    1: 50.0,  # 火炮 (Artillery)：极高威胁
+    2: 20.0,  # 坦克 (Tank)：高威胁
+    3: 5.0,   # 军用汽车 (Military Car)：中等威胁
+    0: 1.0,   # 士兵 (Soldier)：低威胁
+}
+
+# =================================================================
+# 新增：单体目标威胁等级标签 (用于显示在检测框上)
+# =================================================================
+OBJECT_LEVEL_LABELS = {
+    0: "LOW",       # 士兵 -> 低威胁
+    1: "EXTREME",   # 火炮 -> 极高威胁
+    2: "HIGH",      # 坦克 -> 高威胁
+    3: "MEDIUM"     # 军车 -> 中威胁
+}
+def get_threat_level(detections, img_w, img_h):
+    """
+    计算威胁等级
+    :param detections: list of [x1, y1, x2, y2, conf, cls_id]
+    """
+    total_score = 0.0
+    if not detections:
+        return 0.0, "SECURE", (0, 255, 0) # 绿色安全
+
+    img_area = img_w * img_h
+
+    for det in detections:
+        x1, y1, x2, y2, conf, cls_id = det
+        
+        # 1. 获取基础分
+        base_score = THREAT_CONFIG.get(cls_id, 0.5) 
+        
+        # 2. 计算距离/大小系数 (框越大，威胁越大)
+        box_area = (x2 - x1) * (y2 - y1)
+        size_ratio = box_area / img_area
+        size_factor = 1.0 + (size_ratio * 2.0)
+        
+        total_score += base_score * size_factor
+
+    # 3. 等级评定
+    if total_score == 0:
+        return 0.0, "SECURE", (0, 255, 0)      # 绿色
+    elif total_score < 5.0:
+        return total_score, "LOW", (0, 255, 255)       # 黄色
+    elif total_score < 20.0:
+        return total_score, "CAUTION", (0, 165, 255)   # 橙色
+    elif total_score < 50.0:
+        return total_score, "DANGER", (0, 0, 255)      # 红色
+    else:
+        return total_score, "CRITICAL", (0, 0, 128)    # 深红/紫色
+
 def load_labels(label_path):
     """读取标签文件并返回类别ID集合"""
     true_classes = set()
@@ -305,90 +360,135 @@ def start_inference(compiled_model, img_dir):
     time_records = []
     total_start = time.perf_counter()
 
-    # 执行推理
-    print("Starting inference and accuracy calculation...")
+    # print(f"Processing: {IMAGE_DIR}")
 
-    # pic_list = os.listdir(IMAGE_DIR)
-    # for pic in pic_list:
-    #     if not pic.lower().endswith(('.png', '.jpg', '.jpeg')):
-    #         continue
-    #
-    #     # 执行推理并获取耗时
-    #     image_path = os.path.join(IMAGE_DIR, pic)
-    prediction, elapsed_time,img0 = Inference(compiled_model, IMAGE_DIR)
+    # 1. 执行推理
+    prediction, elapsed_time, img0 = Inference(compiled_model, IMAGE_DIR)
+    
     if prediction is None:
         print("推理失败，跳过")
         return
+
     time_records.append(elapsed_time)
 
-        # 后处理
-    print(f"Prediction shape: {prediction.shape}")
-    ans = non_max_suppression(prediction,
-                                conf_thres=0.25,
-                                iou_thres=0.45,
-                                max_det=300)
-        #cls_ids = ans[0][:,-1].unique()
-        #print(f"{pic} detected classes: {cls_ids}")
-    pred_classes = set(ans[0][:, -1].int().tolist()) if len(ans[0]) > 0 else set()
-    # Aqua:绘制检测框
-    # 获取模型输入尺寸和原始图片尺寸
+    # 2. NMS 后处理
+    ans = non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, max_det=300)
+    
+    # 3. 准备尺寸参数
     input_layer = compiled_model.input(0)
     input_shape = input_layer.shape
-    # input_shape 通常为 [1, 3, 640, 640]
     if len(input_shape) == 4:
-        input_h = input_shape[2] # Height 在索引 2
-        input_w = input_shape[3] # Width 在索引 3
+        input_h = input_shape[2] 
+        input_w = input_shape[3] 
     else:
-        # 兜底逻辑
         input_h, input_w = 640, 640
-    # 获取原始图片尺寸
+
     height, width = img0.shape[:2]
-    # 比例缩放坐标
     scale_x = width / input_w
     scale_y = height / input_h
 
-    # 绘制检测框 (使用新逻辑)
+    # 4. 解析检测框并存储
+    valid_detections = [] 
+    pred_classes = set() 
+
+    # 定义名称映射 (用于显示在框上和日志中)
+    NAME_MAP = {
+        0: "Soldier",       # 士兵
+        1: "Artillery",     # 火炮
+        2: "Tank",          # 坦克
+        3: "Military Car"   # 军用汽车
+    }
+
     if len(ans[0]) > 0:
         for det in ans[0]:
-            # 1. 提取坐标 (x1, y1, x2, y2)
             xyxy = det[:4]
             conf = float(det[4])
             cls_id = int(det[5])
             
-            # 2. 应用缩放 (模型坐标 -> 原图坐标)
-            # 因为 Inference 中使用的是直接 resize，所以这里直接乘比例即可，不需要去 letterbox 黑边
+            # 还原坐标
             x1 = int(xyxy[0] * scale_x)
             y1 = int(xyxy[1] * scale_y)
             x2 = int(xyxy[2] * scale_x)
             y2 = int(xyxy[3] * scale_y)
             
-            # 3. 坐标边界裁剪 (防止画到图片外面)
+            # 边界裁剪
             x1 = max(0, min(x1, width - 1))
             y1 = max(0, min(y1, height - 1))
             x2 = max(0, min(x2, width - 1))
             y2 = max(0, min(y2, height - 1))
             
-            # 4. 过滤无效框 (如果 x1 >= x2 或 y1 >= y2 则不画)
-            if x2 <= x1 or y2 <= y1:
-                continue
+            if x2 <= x1 or y2 <= y1: continue
+
+            # 存入列表用于威胁计算
+            valid_detections.append([x1, y1, x2, y2, conf, cls_id])
+            pred_classes.add(cls_id)
+
+            # -----------------------------------------------------------
+            # 核心修改：绘制目标框 (格式：LEVEL: Name)
+            # -----------------------------------------------------------
+            # 1. 获取颜色
+            color_idx = cls_id % len(COLORS)
+            color = COLORS[color_idx] 
             
-            # 5. 绘图
-            color = COLORS[cls_id % len(COLORS)] 
-            label = f"{cls_id}: {conf:.2f}"
-            plot_one_box([x1, y1, x2, y2], img0, color=color, label=label, line_thickness=3)
+            # 2. 获取威胁等级文本 (从全局配置 OBJECT_LEVEL_LABELS 获取)
+            # 如果 ID 不在配置中，默认显示 ID 数字
+            level_text = OBJECT_LEVEL_LABELS.get(cls_id, str(cls_id))
+            
+            # 3. 获取目标名称
+            class_name = NAME_MAP.get(cls_id, "Unknown")
+
+            # 4. 组合标签: "HIGH: Tank"
+            label = f"{level_text}: {class_name}"
+            
+            plot_one_box([x1, y1, x2, y2], img0, color=color, label=label, line_thickness=2)
+            # -----------------------------------------------------------
+
+    # 5. 计算整图威胁等级
+    threat_score, threat_level, threat_color = get_threat_level(valid_detections, width, height)
+
+    # 6. 绘制 HUD (左上角仪表盘)
+    overlay = img0.copy()
+    cv2.rectangle(overlay, (0, 0), (380, 60), (0, 0, 0), -1)
+    alpha = 0.6
+    cv2.addWeighted(overlay, alpha, img0, 1 - alpha, 0, img0)
     
-        # 保存带有检测框的图片
-        output_dir = os.path.join(os.path.dirname(IMAGE_DIR), "detections")
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, os.path.basename(IMAGE_DIR))
-        cv2.imwrite(output_path, img0)
-        print(f"Saved detection image to: {output_path}")
+    info_text = f"LEVEL: {threat_level}  SCORE: {int(threat_score)}"
+    cv2.putText(img0, info_text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 
+                1.0, threat_color, 2, cv2.LINE_AA)
 
-        # 发送图片到服务器
-        server_ip = "10.70.56.108"  # 服务器地址
-        server_port = 9996  # 服务器端口（确保服务器监听此端口）
-        send_image_to_server(output_path, server_ip, server_port)
+    # 高威胁警示框 (红框)
+    if threat_score >= 20.0:
+        cv2.rectangle(img0, (0, 0), (width-1, height-1), threat_color, 10)
 
+    # 7. 保存与回传
+    output_dir = os.path.join(os.path.dirname(IMAGE_DIR), "detections")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, os.path.basename(IMAGE_DIR))
+    cv2.imwrite(output_path, img0)
+    # print(f"Saved detection image to: {output_path}")
+
+    server_ip = "10.70.56.108"
+    server_port = 9996
+    send_image_to_server(output_path, server_ip, server_port)
+
+    # 8. 打印结构化日志
+    counts = {}
+    for det in valid_detections:
+        cid = int(det[5])
+        c_name = NAME_MAP.get(cid, str(cid)) 
+        counts[c_name] = counts.get(c_name, 0) + 1
+    
+    if counts:
+        target_str = ", ".join([f"{name} x{num}" for name, num in counts.items()])
+    else:
+        target_str = "None"
+
+    print("=" * 60)
+    print(f" [Threat Report] {os.path.basename(IMAGE_DIR)}")
+    print(f" > Level   : {threat_level} (Score: {threat_score:.1f})")
+    print(f" > Targets : {target_str}")
+    print(f" > Latency : {elapsed_time:.2f} ms")
+    print("=" * 60)
         # 读取标签
         #base_name = os.path.splitext(pic)[0]
         #label_path = os.path.join(LABELS_DIR, f"{base_name}.txt")
