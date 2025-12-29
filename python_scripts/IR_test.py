@@ -12,7 +12,13 @@ import socket
 # 和 issros 交互模块
 import threading
 import queue
-
+COLORS = [
+    [0, 255, 0],    # 绿 (Green)
+    [0, 255, 255],   # 黄 (Yellow)
+    [0, 0, 255],    # 红 (Red)
+    [255, 0, 0],    # 蓝 (Blue)
+    [255, 0, 255],  # 品红 (Magenta)
+]
 def load_labels(label_path):
     """读取标签文件并返回类别ID集合"""
     true_classes = set()
@@ -41,37 +47,66 @@ def calculate_accuracy(pred_classes, true_classes):
 def Inference(compiled_model, image_file):
     start_time = time.perf_counter()
 
-    # 读取图像并预处理
+    # 1. 安全检查与读取
+    if not os.path.exists(image_file):
+        print(f"[Error] File does not exist: {image_file}")
+        return None, 0, None
+
     img0 = cv2.imread(image_file)
-    print("Original Image Size:", img0.shape)
-    img_name = os.path.basename(image_file)
-    print(f"Image name: {img_name}")
+    if img0 is None:
+        print(f"[Error] Failed to read image with cv2: {image_file}")
+        return None, 0, None
 
-    # 获取模型输入要求
-    input_tensor = compiled_model.input(0)
-    input_shape = input_tensor.shape
-    h, w = input_shape[1], input_shape[2]
+    # print("Original Image Size:", img0.shape)
+    # img_name = os.path.basename(image_file)
 
-    # 预处理流程
-    img = cv2.resize(img0, (w, h))
+    # 2. 获取模型期望的输入尺寸 (N, C, H, W)
+    # 因为我们在 main 里已经 reshape 过了，或者是静态模型，这里直接读 shape
+    input_layer = compiled_model.input(0)
+    input_shape = input_layer.shape
+    
+    # 解析 NCHW。通常 shape 为 [1, 3, 640, 640]
+    # 如果 shape 获取失败或维度不对，默认使用 640
+    if len(input_shape) == 4:
+        target_h, target_w = input_shape[2], input_shape[3]
+    else:
+        target_h, target_w = 640, 640
+
+    # 3. 手动预处理 (替代导致崩溃的 PPP)
+    # [Resize] 调整大小
+    img = cv2.resize(img0, (target_w, target_h))
+    
+    # [Color] BGR -> RGB (OpenCV 默认 BGR，模型通常要 RGB)
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = np.expand_dims(img, axis=0)
+    
+    # [Normalize] 归一化 0-255 -> 0.0-1.0 & 转 float32
     img = img.astype(np.float32) / 255.0
 
-    # 创建 OpenVINO Tensor
+    # [Layout] HWC -> CHW (关键步骤：OpenCV 是 HWC，OpenVINO 输入需要 CHW)
+    # 原始: [640, 640, 3] -> 目标: [3, 640, 640]
+    img = img.transpose((2, 0, 1))
+
+    # [Batch] 增加 Batch 维度 -> [1, 3, 640, 640]
+    img = np.expand_dims(img, axis=0)
+
+    # [Memory] 确保内存连续 (非常重要！防止底层 C++ 访问越界导致段错误)
+    img = np.ascontiguousarray(img)
+
+    # 4. 封装 Tensor 并推理
     input_tensor = Tensor(img)
 
-    # 执行推理
+    # 创建推理请求 (注意：频繁创建可能会微损耗性能，若追求极致可移到函数外复用)
     infer_request = compiled_model.create_infer_request()
     infer_request.infer(inputs={0: input_tensor})
 
-    # 获取输出
+    # 5. 获取输出
     output_tensor = infer_request.get_output_tensor()
 
     # 计算耗时（毫秒）
     inference_time = (time.perf_counter() - start_time) * 1000
 
-    return torch.from_numpy(output_tensor.data), inference_time, img0  # 返回原始图片
+    # 返回 PyTorch Tensor 以兼容后续的 non_max_suppression 代码
+    return torch.from_numpy(output_tensor.data), inference_time, img0
 
 def xywh2xyxy(x):
     # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
@@ -214,6 +249,50 @@ def send_image_to_server(image_path, server_ip, server_port):
         except Exception as e:
             print(f"发送图片时出错: {e}")
 
+# ==========================================
+# 修改部分 2：D2L 风格绘图函数 (细线 + 小字 + 实心背景)
+# ==========================================
+def plot_one_box(x, img, color=None, label=None, line_thickness=None):
+    """
+    优化的绘图函数，模仿 D2L 风格
+    """
+    # 1. 强制使用细线和小字体
+    tl = 2  # 线宽固定为 2 (细线)
+    font_scale = 0.5  # 字体大小固定为 0.5 (小字)
+    font_thickness = 1  # 字体粗细固定为 1
+    
+    # 2. 获取坐标整数值
+    c1, c2 = (int(x[0]), int(x[1])), (int(x[2]), int(x[3]))
+    
+    # 3. 绘制矩形框
+    cv2.rectangle(img, c1, c2, color, thickness=tl, lineType=cv2.LINE_AA)
+    
+    # 4. 绘制标签
+    if label:
+        # 计算文本尺寸
+        t_size = cv2.getTextSize(label, 0, fontScale=font_scale, thickness=font_thickness)[0]
+        padding = 2 # 文字背景的留白
+        
+        # 5. 确定文字位置 (优先画在左上角外部，如果溢出则画在内部)
+        if c1[1] - t_size[1] - (padding*2) < 0: 
+             # 画在框内
+             text_origin = (c1[0] + padding, c1[1] + t_size[1] + padding)
+             # 背景矩形坐标
+             rect_c1 = (c1[0], c1[1])
+             rect_c2 = (c1[0] + t_size[0] + padding*2, c1[1] + t_size[1] + padding*2)
+        else:
+             # 画在框外
+             text_origin = (c1[0] + padding, c1[1] - padding)
+             # 背景矩形坐标
+             rect_c1 = (c1[0], c1[1] - t_size[1] - padding*2)
+             rect_c2 = (c1[0] + t_size[0] + padding*2, c1[1])
+             
+        # 绘制与边框同色的实心背景
+        cv2.rectangle(img, rect_c1, rect_c2, color, -1, cv2.LINE_AA)
+        
+        # 6. 绘制白色文字
+        cv2.putText(img, label, text_origin, 0, font_scale, [255, 255, 255], thickness=font_thickness, lineType=cv2.LINE_AA)
+
 # 调用推理模型的函数
 def start_inference(compiled_model, img_dir):
     IMAGE_DIR = img_dir
@@ -237,6 +316,9 @@ def start_inference(compiled_model, img_dir):
     #     # 执行推理并获取耗时
     #     image_path = os.path.join(IMAGE_DIR, pic)
     prediction, elapsed_time,img0 = Inference(compiled_model, IMAGE_DIR)
+    if prediction is None:
+        print("推理失败，跳过")
+        return
     time_records.append(elapsed_time)
 
         # 后处理
@@ -247,35 +329,53 @@ def start_inference(compiled_model, img_dir):
                                 max_det=300)
         #cls_ids = ans[0][:,-1].unique()
         #print(f"{pic} detected classes: {cls_ids}")
-    pred_classes = set(ans[0][:,-1].int().tolist())
-
+    pred_classes = set(ans[0][:, -1].int().tolist()) if len(ans[0]) > 0 else set()
     # Aqua:绘制检测框
     # 获取模型输入尺寸和原始图片尺寸
-    input_shape = compiled_model.input(0).shape
-    input_h, input_w = input_shape[1], input_shape[2]
+    input_layer = compiled_model.input(0)
+    input_shape = input_layer.shape
+    # input_shape 通常为 [1, 3, 640, 640]
+    if len(input_shape) == 4:
+        input_h = input_shape[2] # Height 在索引 2
+        input_w = input_shape[3] # Width 在索引 3
+    else:
+        # 兜底逻辑
+        input_h, input_w = 640, 640
+    # 获取原始图片尺寸
     height, width = img0.shape[:2]
-
     # 比例缩放坐标
     scale_x = width / input_w
     scale_y = height / input_h
 
-    # 绘制检测框
+    # 绘制检测框 (使用新逻辑)
     if len(ans[0]) > 0:
         for det in ans[0]:
-            xyxy, conf, cls_id = det[:4], det[4], det[5]
-            # 缩放坐标到原始图片尺寸
+            # 1. 提取坐标 (x1, y1, x2, y2)
+            xyxy = det[:4]
+            conf = float(det[4])
+            cls_id = int(det[5])
+            
+            # 2. 应用缩放 (模型坐标 -> 原图坐标)
+            # 因为 Inference 中使用的是直接 resize，所以这里直接乘比例即可，不需要去 letterbox 黑边
             x1 = int(xyxy[0] * scale_x)
             y1 = int(xyxy[1] * scale_y)
             x2 = int(xyxy[2] * scale_x)
             y2 = int(xyxy[3] * scale_y)
-            # 裁剪坐标到图片边界
-            x1, y1 = max(x1, 0), max(y1, 0)
-            x2, y2 = min(x2, width), min(y2, height)
-            # 绘制矩形框
-            cv2.rectangle(img0, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            # 绘制文本
-            label = f"{int(cls_id)}: {conf:.2f}"
-            cv2.putText(img0, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            
+            # 3. 坐标边界裁剪 (防止画到图片外面)
+            x1 = max(0, min(x1, width - 1))
+            y1 = max(0, min(y1, height - 1))
+            x2 = max(0, min(x2, width - 1))
+            y2 = max(0, min(y2, height - 1))
+            
+            # 4. 过滤无效框 (如果 x1 >= x2 或 y1 >= y2 则不画)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
+            # 5. 绘图
+            color = COLORS[cls_id % len(COLORS)] 
+            label = f"{cls_id}: {conf:.2f}"
+            plot_one_box([x1, y1, x2, y2], img0, color=color, label=label, line_thickness=3)
     
         # 保存带有检测框的图片
         output_dir = os.path.join(os.path.dirname(IMAGE_DIR), "detections")
@@ -503,7 +603,8 @@ if __name__ == "__main__":
 
     # 初始化OpenVINO Core
     core = Core()
-
+    # 禁用缓存，避免文件锁问题
+    core.set_property({'CACHE_DIR': ''})
     # 加载模型（自动处理xml+bin）
     print("Loading model...")
     model = core.read_model(MODEL_XML)
@@ -513,19 +614,19 @@ if __name__ == "__main__":
         model.reshape({0: PartialShape([1,3,640,640])})
     print("***debug2")
     # 预处理配置（可选）
-    ppp = PrePostProcessor(model)
-    print("***debug3")
-    ppp.input().tensor() \
-        .set_layout(Layout("NHWC")) \
-        .set_color_format(ColorFormat.RGB) \
-        .set_element_type(Type.f32)
-     # 模型内部布局（如需要可设为 NCHW）
-    print("***debug4")
-    ppp.input().preprocess() \
-        .convert_layout("NCHW")
-    print("***debug5")
-    model = ppp.build()
-    print("***debug6")
+    # ppp = PrePostProcessor(model)
+    # print("***debug3")
+    # ppp.input().tensor() \
+    #     .set_layout(Layout("NHWC")) \
+    #     .set_color_format(ColorFormat.RGB) \
+    #     .set_element_type(Type.f32)
+    #  # 模型内部布局（如需要可设为 NCHW）
+    # print("***debug4")
+    # ppp.input().preprocess() \
+    #     .convert_layout("NCHW")
+    # print("***debug5")
+    # model = ppp.build()
+    # print("***debug6")
     #
     # # 编译模型（自动设备发现）
     compiled_model = core.compile_model(model, DEVICE)
