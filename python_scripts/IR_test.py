@@ -12,6 +12,8 @@ import socket
 # 和 issros 交互模块
 import threading
 import queue
+import json
+import hashlib
 COLORS = [
     [0, 255, 0],    # 绿 (Green)
     [0, 255, 255],   # 黄 (Yellow)
@@ -38,6 +40,60 @@ OBJECT_LEVEL_LABELS = {
     2: "HIGH",      # 坦克 -> 高威胁
     3: "MEDIUM"     # 军车 -> 中威胁
 }
+
+
+def log_task_result(img_name, threat_level, threat_score, detections):
+    """
+    生成符合测试用例三要求的精简数据包，并实时写入本地文件
+    """
+    # 1. 构建精简的目标列表 (只保留核心字段)
+    # 0:士兵, 1:火炮, 2:坦克, 3:军车
+    NAME_MAP = {0: "Soldier", 1: "Artillery", 2: "Tank", 3: "Military Car"}
+    
+    clean_targets = []
+    for det in detections:
+        # det: [x1, y1, x2, y2, conf, cls_id]
+        cls_id = int(det[5])
+        clean_targets.append({
+            "id": cls_id,
+            "obj": NAME_MAP.get(cls_id, "Unknown"),
+            "box": [int(det[0]), int(det[1]), int(det[2]), int(det[3])], # 坐标取整，减少字节
+            # "conf": round(float(det[4]), 2) # 如果seL4不需要置信度，这行可以注释掉以进一步精简
+        })
+
+    # 2. 构建核心数据包 (Payload)
+    # 这是需要传输给 seL4 的原始内容
+    payload = {
+        "ts": f"{time.time():.3f}",       # 时间戳 (Timestamp)
+        "img": img_name,                  # 帧ID (Frame ID)
+        "lvl": threat_level,              # 威胁等级 (Threat Level)
+        "scr": round(threat_score, 1),    # 威胁分数 (Score)
+        "cnt": len(clean_targets),        # 目标数量 (Count)
+        "tgt": clean_targets              # 目标详情 (Targets)
+    }
+
+    # 3. 序列化与完整性校验
+    # separators=(',', ':') 去除空格，使 JSON 最紧凑
+    json_str = json.dumps(payload, separators=(',', ':'))
+    
+    # 计算校验和 (Simulate integrity check for Test Case 3)
+    checksum = hashlib.md5(json_str.encode()).hexdigest()[:8]
+    
+    # 4. 构造最终日志行 (带校验头)
+    # 格式: [CHECKSUM] JSON_STRING
+    log_line = f"[{checksum}] {json_str}"
+
+    # 5. 实时写入文件 (Append mode + Flush)
+    log_file = "/home/mission_output.log"
+    try:
+        with open(log_file, "a") as f:
+            f.write(log_line + "\n")
+            # with 语句退出时会自动 flush，确保断电数据不丢
+    except Exception as e:
+        print(f"日志写入失败: {e}")
+
+    return log_line, len(json_str)
+
 def get_threat_level(detections, img_w, img_h):
     """
     计算威胁等级
@@ -471,7 +527,17 @@ def start_inference(compiled_model, img_dir):
     server_port = 9996
     send_image_to_server(output_path, server_ip, server_port)
 
-    # 8. 打印结构化日志
+    # =================================================================
+    # 8. [新增] 生成测试用例数据包 (写入 mission_output.log)
+    # =================================================================
+    log_line = log_task_result(
+        os.path.basename(IMAGE_DIR), 
+        threat_level, 
+        threat_score, 
+        valid_detections
+    )
+
+    # 9. 打印终端日志
     counts = {}
     for det in valid_detections:
         cid = int(det[5])
@@ -488,6 +554,7 @@ def start_inference(compiled_model, img_dir):
     print(f" > Level   : {threat_level} (Score: {threat_score:.1f})")
     print(f" > Targets : {target_str}")
     print(f" > Latency : {elapsed_time:.2f} ms")
+    print(f" > Data Log: {log_line[:50]}... (Saved)") # 只打印前50字符提示
     print("=" * 60)
         # 读取标签
         #base_name = os.path.splitext(pic)[0]
