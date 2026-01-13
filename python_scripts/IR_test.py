@@ -523,7 +523,7 @@ def start_inference(compiled_model, img_dir):
     cv2.imwrite(output_path, img0)
     # print(f"Saved detection image to: {output_path}")
 
-    server_ip = "10.70.56.108"
+    server_ip = "10.70.123.17"
     server_port = 9996
     send_image_to_server(output_path, server_ip, server_port)
 
@@ -712,7 +712,7 @@ def image_server_thread(port, save_dir, uav_name, q):
 def handshake_server():
     HANDSHAKE_MSG = "011111"
     srt = "3040"
-    server_ip = "10.70.56.108"
+    server_ip = "10.70.123.17"
     server_port = 65432
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as conn:
         conn.connect((server_ip, server_port))
