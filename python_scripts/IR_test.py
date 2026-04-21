@@ -523,7 +523,7 @@ def start_inference(compiled_model, img_dir):
     cv2.imwrite(output_path, img0)
     # print(f"Saved detection image to: {output_path}")
 
-    server_ip = "10.70.123.17"
+    server_ip = "10.70.250.195"
     server_port = 9996
     send_image_to_server(output_path, server_ip, server_port)
 
@@ -607,7 +607,6 @@ def inference_worker(q, shutdown_event, compiled_model):
         try:
             img_name=q.get(False)
             # 路径格式为：绝对路径前缀 + 设备名（UAV1/3）+ 图像类型（0/1）+ 调度阶段（stage_0~stage_4）
-            # IMAGE_DIR = 'D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\labels_and_dataset\dataset\my_data\\' + img_name
             IMAGE_DIR = '/home/jupyterWorkspace/is2ros_yolov5_inference_zc/labels_and_dataset/dataset/my_data/'+ img_name
 
             print(IMAGE_DIR)
@@ -708,53 +707,13 @@ def image_server_thread(port, save_dir, uav_name, q):
             except Exception as e:
                 print(f"[异常] {uav_name} 连接错误: {e}")
                 continue
-# ================== 新增：握手服务线程 ==================
-def handshake_server():
-    HANDSHAKE_MSG = "011111"
-    srt = "3040"
-    server_ip = "10.70.123.17"
-    server_port = 65432
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as conn:
-        conn.connect((server_ip, server_port))
-        print(f"已连接到服务器: {server_ip}:{server_port}")
 
-        while True:
-        
-            try:
-                # 接收客户端发送的握手消息
-                received = conn.recv(1024).decode("utf-8")
-                print(f"接受到server消息为{received}")
-                conn.sendall(srt.encode("utf-8"))
-            except Exception as e:
-                print(" 出现异常:", e)
-            #finally:
-                #conn.close()
+
 
 # ------------------------- 主程序重构 -------------------------
 
 if __name__ == "__main__":
 
-    # uav_configs = [
-    #     (8891, "D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\labels_and_dataset\dataset\my_data", "uav1"),
-    #     (8892, "D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\labels_and_dataset\dataset\my_data", "uav2"),
-    #     (8893, "D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\labels_and_dataset\dataset\my_data", "uav3"),
-    # ]
-    # # uav_configs = [
-    # #     (8891, "/home/bousew/jupyterWorkspace/is2ros_yolov5_inference/labels_and_dataset/dataset/my_data/", "uav1"),
-    # #     (8892, "/home/bousew/jupyterWorkspace/is2ros_yolov5_inference/labels_and_dataset/dataset/my_data/", "uav2"),
-    # #     (8893, "/home/bousew/jupyterWorkspace/is2ros_yolov5_inference/labels_and_dataset/dataset/my_data/", "uav3"),
-    # # ]
-    # q = queue.Queue()
-    # threads = []
-    # for port, save_dir, uav_name in uav_configs:
-    #     t = threading.Thread(target=image_server_thread, args=(port, save_dir, uav_name, q))
-    #     t.daemon = False
-    #     t.start()
-    #     threads.append(t)
-    # print("服务器已启动，等待 UAV 图像传输...")
-    #
-    # for t in threads:
-    #     t.join()
 
     # 初始化模型配置参数
     # 2025推荐使用统一设备API，支持"AUTO", "GPU", "MYRIAD"等
@@ -762,8 +721,6 @@ if __name__ == "__main__":
     DEVICE = "CPU"
 
     # 模型路径
-    # MODEL_XML = 'D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\yolov5_scripts\IR_models\IR_model_with_ovc\\best.xml'
-    # MODEL_BIN = 'D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\yolov5_scripts\IR_models\IR_model_with_ovc\\best.bin'
     MODEL_XML = '/home/jupyterWorkspace/is2ros_yolov5_inference_zc/yolov5_scripts/IR_models/IR_model_with_ovc/best.xml'
     MODEL_BIN = '/home/jupyterWorkspace/is2ros_yolov5_inference_zc/yolov5_scripts/IR_models/IR_model_with_ovc/best.bin'
 
@@ -803,16 +760,14 @@ if __name__ == "__main__":
     print(f"Input shape: {compiled_model.input(0).shape}")
     print(f"Output shape: {compiled_model.output(0).shape}")
 
-    # uav_configs = [
-    #     (8891, "D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\labels_and_dataset\dataset\my_data", "uav1"),
-    #     (8892, "D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\labels_and_dataset\dataset\my_data", "uav2"),
-    #     (8893, "D:\Desktop\jupyterWorkspace_BAC\is2ros_yolov5_inference\labels_and_dataset\dataset\my_data", "uav3"),
-    # ]
+
 
     uav_configs = [
-        # (8891, "/home/jupyterWorkspace/is2ros_yolov5_inference_zc/labels_and_dataset/dataset/my_data/", "uav1"),
-        (8892, "/home/jupyterWorkspace/is2ros_yolov5_inference_zc/labels_and_dataset/dataset/my_data/", "uav2"),
-        # (8893, "/home/jupyterWorkspace/is2ros_yolov5_inference_zc/labels_and_dataset/dataset/my_data/", "uav3"),
+        (8881, "/home/jupyterWorkspace/is2ros_yolov5_inference_zc/labels_and_dataset/dataset/my_data/", "uav1"),
+        # (8882, "/home/jupyterWorkspace/is2ros_yolov5_inference_zc/labels_and_dataset/dataset/my_data/", "uav2"),
+        # (8883, "/home/jupyterWorkspace/is2ros_yolov5_inference_zc/labels_and_dataset/dataset/my_data/", "uav3"),
+        # (8884, "/home/jupyterWorkspace/is2ros_yolov5_inference_zc/labels_and_dataset/dataset/my_data/", "uav4"),
+        # (8885, "/home/jupyterWorkspace/is2ros_yolov5_inference_zc/labels_and_dataset/dataset/my_data/", "uav5"),
     ]
 
     q = queue.Queue()
