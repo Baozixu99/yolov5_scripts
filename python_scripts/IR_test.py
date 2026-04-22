@@ -342,12 +342,32 @@ def send_image_to_server(image_path, server_ip, server_port):
         image_data = f.read()
         print("###succeed read image###")
 
+    # 解析发送端 UAV 名称与原始文件名
+    image_name = os.path.basename(image_path)
+    if "_" in image_name:
+        uav_name = image_name.split("_", 1)[0]
+    else:
+        uav_name = "uav"
+
+    # 扩展协议头：魔数 + 元信息长度 + 元信息 JSON
+    # 兼容接收端按来源命名，例如 uav3_20.png
+    meta = {
+        "uav": uav_name,
+        "name": image_name
+    }
+    meta_bytes = json.dumps(meta, separators=(',', ':')).encode('utf-8')
+
     # 创建一个 TCP Socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             # 连接到服务器
             s.connect((server_ip, server_port))
             print(f"已连接到服务器: {server_ip}:{server_port}")
+
+            # 发送扩展协议头
+            s.sendall(b'UVP1')
+            s.sendall(len(meta_bytes).to_bytes(4, byteorder='big'))
+            s.sendall(meta_bytes)
 
             # 发送图片数据长度
             image_len = len(image_data).to_bytes(4, byteorder='big')
